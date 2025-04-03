@@ -1,5 +1,3 @@
-
-
 import os
 import streamlit as st
 import hashlib
@@ -69,7 +67,6 @@ def store_vectors_in_db(text_chunks, source):
     existing_entry = supabase.table("pdf_embeddings").select("pdf_hash").eq("pdf_hash", content_hash).execute()
     if existing_entry.data:
         supabase.table("pdf_embeddings").update({"status": "active"}).eq("pdf_hash", content_hash).execute()
-
         return f"Duplicate content detected for {source}. Skipping storage."
 
     # Store each chunk separately
@@ -92,8 +89,16 @@ def search_vectors(user_query):
     if "embedding" in response:
         query_embedding = response["embedding"]
         response = supabase.rpc("match_documents", {
-            "query_embedding": query_embedding, "match_threshold": 0.7, "match_count": 5
+            "query_embedding": query_embedding, "match_threshold": 0.7, "match_count": 3
         }).execute()
+        print(response.data)
+        search_results = [row["text"] for row in response.data] if response.data  else []
+        
+        st.subheader("Sources")
+        with st.expander("View souce"):
+            for result in search_results:
+                st.markdown(f"<div style='border: 1px solid #ccc; padding: 10px; margin: 5px; border-radius: 5px;'>{result}</div>", unsafe_allow_html=True)
+
         return [row["text"] for row in response.data] if response.data else []
     return []
 
@@ -111,7 +116,6 @@ def user_input(user_question):
 
     relevant_chunks = search_vectors(user_question)
     chain = get_conversational_chain()
-    # response = chain({"context": "\n".join(relevant_chunks), "question": user_question}, return_only_outputs=True)
     response = chain.invoke({"context": "\n".join(relevant_chunks), "question": user_question})
 
     answer = response.get("text", "No valid response")
@@ -121,12 +125,12 @@ def user_input(user_question):
     st.session_state.chat_history.append({"role": "assistant", "content": answer})
 
     return answer
- 
-# Streamlit UI
+
 def main():
     st.set_page_config("Document & Web Scraper")
     st.header("Explore Documents & Websites")
 
+    # Initialize session state variables
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
     if "conversation_records" not in st.session_state:
@@ -137,90 +141,133 @@ def main():
         st.session_state.uploaded_files = None
     if "is_active" not in st.session_state:
         st.session_state.is_active = False
+    if "scraped_url" not in st.session_state:
+        st.session_state.scraped_url = None
+    if "current_chat_id" not in st.session_state:
+        st.session_state.current_chat_id = None
 
-    st.sidebar.markdown(
-        """
-        <h3 style="text-align: center; font-weight: bold;">Chat History</h3>
-        """, 
-        unsafe_allow_html=True
-    )
-
+    st.sidebar.markdown("<h3 style='text-align: center; font-weight: bold;'>M Chat</h3>", unsafe_allow_html=True)
+    
     # New Chat Button
     if st.sidebar.button("New Chat", use_container_width=True):
-        mark_previous_records_inactive()  # Mark all old records as inactive
-        if st.session_state.current_source:
-            st.session_state.conversation_records.append({
-                "source": st.session_state.current_source,
-                "history": st.session_state.chat_history
-            })
+        # Save current chat to history before clearing
+        if st.session_state.current_source and st.session_state.chat_history:
+            # Generate a unique ID for this chat if it doesn't have one
+            if not st.session_state.current_chat_id:
+                st.session_state.current_chat_id = str(int(time.time()))
+            
+            # Check if this chat already exists in records
+            existing_record = next((r for r in st.session_state.conversation_records 
+                                  if r.get("chat_id") == st.session_state.current_chat_id), None)
+            
+            if existing_record:
+                # Update existing record
+                existing_record["history"] = st.session_state.chat_history.copy()
+            else:
+                # Add new record
+                st.session_state.conversation_records.append({
+                    "chat_id": st.session_state.current_chat_id,
+                    "source": st.session_state.current_source,
+                    "history": st.session_state.chat_history.copy(),
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")
+                })
+        
+        # Reset for new chat
+        mark_previous_records_inactive()
         st.session_state.chat_history = []
         st.session_state.current_source = None
         st.session_state.uploaded_files = None
-        st.session_state.is_active = False  # Reset active session
+        st.session_state.is_active = False
+        st.session_state.scraped_url = None
+        st.session_state.current_chat_id = None  # Reset chat ID for new chat
         st.rerun()
 
-    # Display chat history
-    st.sidebar.header("Chat History")
-    for idx, record in enumerate(st.session_state.conversation_records):
-        if st.sidebar.button(f"{record['source']}", key=f"chat_{idx}", use_container_width=True):
-            st.session_state.chat_history = record["history"]
-            st.session_state.current_source = record["source"]
-            st.session_state.is_active = True  # Reactivate session
-            st.rerun()
+    # Display chat history in sidebar
+    st.sidebar.subheader("Chat History")
+    if st.session_state.conversation_records:
+        # Sort by timestamp (newest first)
+        sorted_records = sorted(st.session_state.conversation_records, 
+                              key=lambda x: x.get("timestamp", ""), 
+                              reverse=True)
+        
+        for record in sorted_records:
+            display_name = f"{record['source']} - {record.get('timestamp', '')}"
+            
+            if st.sidebar.button(display_name, key=f"chat_{record['chat_id']}", use_container_width=True):
+                st.session_state.chat_history = record["history"]
+                st.session_state.current_source = record["source"]
+                st.session_state.is_active = True
+                st.session_state.current_chat_id = record["chat_id"]
+                st.rerun()
+    else:
+        st.sidebar.write("No previous chats")
+
+    # Choose Input Type
     option = st.radio("Choose Input Type", ["Upload PDF", "Enter Website Domain"])
 
+    # Handle PDF Upload
     if option == "Upload PDF":
+        fname=""
         uploaded_files = st.file_uploader("Upload your PDF Files", accept_multiple_files=True)
         if st.button("Submit PDF"):
             with st.spinner("Processing PDFs..."):
                 for pdf in uploaded_files:
+                    fname+=pdf.name.replace(".pdf", "")+" "
                     raw_text = get_pdf_text(pdf)
                     text_chunks = get_text_chunks(raw_text)
                     source = pdf.name.replace(".pdf", "")
                     store_vectors_in_db(text_chunks, source)
                 
+                st.session_state.uploaded_files = uploaded_files
                 st.session_state.is_active = True
+                # st.session_state.current_source =uploaded_files[0].name.replace(".pdf", "")
+                st.session_state.current_source =fname
+                st.session_state.current_chat_id = str(int(time.time()))  # Generate new chat ID
                 st.success("PDFs stored! You can now chat with them.")
 
+        # Display PDFs
+        if st.session_state.uploaded_files:
+            with st.sidebar:
+                st.subheader("Select a PDF to View")
+                selected_file = st.selectbox("Choose a file", st.session_state.uploaded_files, 
+                                           format_func=lambda x: x.name)
+
+            if selected_file:
+                st.markdown(f"### Viewing: {selected_file.name}")
+                selected_file.seek(0)
+                base64_pdf = base64.b64encode(selected_file.read()).decode("utf-8")
+                st.markdown(f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="600px"></iframe>', 
+                           unsafe_allow_html=True)
+
+    # Handle Web Scraping
     elif option == "Enter Website Domain":
         domain = st.text_input("Enter Website URL")
         if st.button("Scrape Website"):
             with st.spinner("Scraping website..."):
                 landing_page_text = extract_landing_page_data(domain)
                 text_chunks = get_text_chunks(landing_page_text)
-                st.session_state.current_source = domain.split("//")[-1].split("/")[0]
+                st.session_state.current_source = domain
+                st.session_state.scraped_url = domain
+                st.session_state.current_chat_id = str(int(time.time()))  # Generate new chat ID
                 store_vectors_in_db(text_chunks, "Web Scraping")
                 st.session_state.is_active = True
                 st.success("Website content stored!")
 
+        # Display Webpage
+        if st.session_state.scraped_url:
+            st.markdown(f"### View: {st.session_state.scraped_url}")
+     
+    # Display Chat Messages
     for msg in st.session_state.chat_history:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
+    # User Input Handling
     user_query = st.chat_input("Ask something about the stored content...")
     if user_query:
         st.chat_message("user").markdown(user_query)
         answer = user_input(user_query)
         st.chat_message("assistant").markdown(answer)
-
-     # Function to display PDF in Streamlit
-    # Directory to store uploaded PDFs
-    # Function to display PDF
-    def display_pdf(file):
-        base64_pdf = base64.b64encode(file.read()).decode("utf-8")
-        pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="600px"></iframe>'
-        return pdf_display
-            
-   # Display PDFs in sidebar
-    if uploaded_files:
-        with st.sidebar:
-            st.subheader("Select a PDF to View")
-            selected_file = st.selectbox("Choose a file", uploaded_files, format_func=lambda x: x.name)
-
-        # Show selected PDF
-        if selected_file:
-            st.markdown(f"### Viewing: {selected_file.name}")
-            st.markdown(display_pdf(selected_file), unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
