@@ -29,7 +29,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 def mark_previous_records_inactive():
     supabase.table("pdf_embeddings").update({"status": "inactive"}).neq("status", "inactive").execute()
 
-# Extract text from PDFs
+# Extracting text(PDF)
 def get_pdf_text(pdf):
     pdf_reader = PdfReader(pdf)
     text = ""
@@ -37,7 +37,7 @@ def get_pdf_text(pdf):
         text += page.extract_text() or ""
     return text
 
-# Extract text from websites
+# Extracting text(website)
 def extract_landing_page_data(url):
     driver = webdriver.Chrome()
     driver.get(url)
@@ -49,16 +49,16 @@ def extract_landing_page_data(url):
     driver.quit()
     return page_text
 
-# Split text into chunks
+# chunks generation
 def get_text_chunks(text):
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=10000, chunk_overlap=1000)
     return text_splitter.split_text(text)
 
-# Generate hash for deduplication
+# Hash generation
 def generate_hash(text):
     return hashlib.sha256(text.encode()).hexdigest()
 
-# Store text chunks in Supabase
+# Chunks into Supabase
 def store_vectors_in_db(text_chunks, source):
     full_text = "\n".join(text_chunks)
     content_hash = generate_hash(full_text)
@@ -83,7 +83,7 @@ def store_vectors_in_db(text_chunks, source):
     
     return f"New content stored successfully for {source}!"
 
-# Search relevant chunks
+# Searching relevant chunks
 def search_vectors(user_query):
     response = genai.embed_content(model="models/embedding-001", content=user_query, task_type="retrieval_query")
     if "embedding" in response:
@@ -102,14 +102,13 @@ def search_vectors(user_query):
         return [row["text"] for row in response.data] if response.data else []
     return []
 
-# Conversational Chain
+
 def get_conversational_chain():
     prompt = PromptTemplate(input_variables=["context", "question"],
-                            template="Context: {context}\n\nQuestion: {question}\n\nAnswer:")
+                            template="Answer only from these context. Answer within this, if not found then return as not found, Context: {context}\n\nQuestion: {question}\n\nAnswer:")
     model = ChatGoogleGenerativeAI(model="models/gemini-1.5-pro-latest", google_api_key=GEMINI_API_KEY)
     return LLMChain(llm=model, prompt=prompt)
 
-# Process user query
 def user_input(user_question):
     if not st.session_state.is_active:
         return "No active content. Please upload a PDF or scrape a website first."
@@ -120,7 +119,6 @@ def user_input(user_question):
 
     answer = response.get("text", "No valid response")
 
-    # Append user query and response to chat history
     st.session_state.chat_history.append({"role": "user", "content": user_question})
     st.session_state.chat_history.append({"role": "assistant", "content": answer})
 
@@ -148,23 +146,17 @@ def main():
 
     st.sidebar.markdown("<h3 style='text-align: center; font-weight: bold;'>M Chat</h3>", unsafe_allow_html=True)
     
-    # New Chat Button
     if st.sidebar.button("New Chat", use_container_width=True):
-        # Save current chat to history before clearing
         if st.session_state.current_source and st.session_state.chat_history:
-            # Generate a unique ID for this chat if it doesn't have one
             if not st.session_state.current_chat_id:
                 st.session_state.current_chat_id = str(int(time.time()))
             
-            # Check if this chat already exists in records
             existing_record = next((r for r in st.session_state.conversation_records 
                                   if r.get("chat_id") == st.session_state.current_chat_id), None)
             
             if existing_record:
-                # Update existing record
                 existing_record["history"] = st.session_state.chat_history.copy()
             else:
-                # Add new record
                 st.session_state.conversation_records.append({
                     "chat_id": st.session_state.current_chat_id,
                     "source": st.session_state.current_source,
@@ -172,20 +164,17 @@ def main():
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M")
                 })
         
-        # Reset for new chat
         mark_previous_records_inactive()
         st.session_state.chat_history = []
         st.session_state.current_source = None
         st.session_state.uploaded_files = None
         st.session_state.is_active = False
         st.session_state.scraped_url = None
-        st.session_state.current_chat_id = None  # Reset chat ID for new chat
+        st.session_state.current_chat_id = None  
         st.rerun()
 
-    # Display chat history in sidebar
     st.sidebar.subheader("Chat History")
     if st.session_state.conversation_records:
-        # Sort by timestamp (newest first)
         sorted_records = sorted(st.session_state.conversation_records, 
                               key=lambda x: x.get("timestamp", ""), 
                               reverse=True)
@@ -202,10 +191,8 @@ def main():
     else:
         st.sidebar.write("No previous chats")
 
-    # Choose Input Type
     option = st.radio("Choose Input Type", ["Upload PDF", "Enter Website Domain"])
 
-    # Handle PDF Upload
     if option == "Upload PDF":
         fname=""
         uploaded_files = st.file_uploader("Upload your PDF Files", accept_multiple_files=True)
@@ -225,7 +212,6 @@ def main():
                 st.session_state.current_chat_id = str(int(time.time()))  # Generate new chat ID
                 st.success("PDFs stored! You can now chat with them.")
 
-        # Display PDFs
         if st.session_state.uploaded_files:
             with st.sidebar:
                 st.subheader("Select a PDF to View")
@@ -239,7 +225,6 @@ def main():
                 st.markdown(f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="600px"></iframe>', 
                            unsafe_allow_html=True)
 
-    # Handle Web Scraping
     elif option == "Enter Website Domain":
         domain = st.text_input("Enter Website URL")
         if st.button("Scrape Website"):
@@ -248,21 +233,18 @@ def main():
                 text_chunks = get_text_chunks(landing_page_text)
                 st.session_state.current_source = domain
                 st.session_state.scraped_url = domain
-                st.session_state.current_chat_id = str(int(time.time()))  # Generate new chat ID
+                st.session_state.current_chat_id = str(int(time.time()))  
                 store_vectors_in_db(text_chunks, "Web Scraping")
                 st.session_state.is_active = True
                 st.success("Website content stored!")
 
-        # Display Webpage
         if st.session_state.scraped_url:
             st.markdown(f"### View: {st.session_state.scraped_url}")
      
-    # Display Chat Messages
     for msg in st.session_state.chat_history:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # User Input Handling
     user_query = st.chat_input("Ask something about the stored content...")
     if user_query:
         st.chat_message("user").markdown(user_query)
